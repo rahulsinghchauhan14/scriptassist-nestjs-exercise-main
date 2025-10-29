@@ -4,18 +4,20 @@ import { UsersService } from '../users/users.service';
 import { LoginDto } from './dto/login.dto';
 import { RegisterDto } from './dto/register.dto';
 import * as bcrypt from 'bcrypt';
+import { UsersRepository } from '@modules/users/repository/users.repository';
 
 @Injectable()
 export class AuthService {
   constructor(
     private readonly usersService: UsersService,
     private readonly jwtService: JwtService,
+    private readonly usersRepository: UsersRepository,
   ) {}
 
   async login(loginDto: LoginDto) {
     const { email, password } = loginDto;
 
-    const user = await this.usersService.findByEmail(email);
+    const user = await this.usersRepository.findByEmail(email);
     
     if (!user) {
       throw new UnauthorizedException('Invalid email');
