@@ -1,102 +1,78 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
-import { Task } from './entities/task.entity';
-import { CreateTaskDto } from './dto/create-task.dto';
-import { UpdateTaskDto } from './dto/update-task.dto';
+
+import { Task } from '@modules/tasks/entities/task.entity';
+import { CreateTaskDto } from '@modules/tasks/dto/create-task.dto';
+import { UpdateTaskDto } from '@modules/tasks/dto/update-task.dto';
 import { InjectQueue } from '@nestjs/bullmq';
 import { Queue } from 'bullmq';
-import { TaskStatus } from './enums/task-status.enum';
+import { TaskStatus } from '@modules/tasks/enums/task-status.enum';
+import { TasksRepository } from '@modules/tasks/repository/task.repository';
+import { PaginatedResponse } from '@common/interfaces/pagination-result.interface';
+import { PaginationOptions } from '@common/interfaces/pagination-options.interface';
+import { TaskStatsDto } from './dto/task-stats.dto';
 
 @Injectable()
 export class TasksService {
   constructor(
-    @InjectRepository(Task)
-    private tasksRepository: Repository<Task>,
+    private readonly tasksRepository: TasksRepository,
     @InjectQueue('task-processing')
     private taskQueue: Queue,
-  ) {}
+  ) { }
 
   async create(createTaskDto: CreateTaskDto): Promise<Task> {
-    // Inefficient implementation: creates the task but doesn't use a single transaction
-    // for creating and adding to queue, potential for inconsistent state
-    const task = this.tasksRepository.create(createTaskDto);
-    const savedTask = await this.tasksRepository.save(task);
-
-    // Add to queue without waiting for confirmation or handling errors
-    this.taskQueue.add('task-status-update', {
-      taskId: savedTask.id,
-      status: savedTask.status,
-    });
+    let savedTask: Task;
+    // save and handle business logic in the repository
+    savedTask = await this.tasksRepository.createAndSave(createTaskDto);
+    try {
+      // add to queue
+      this.taskQueue.add('task-status-update', {
+        taskId: savedTask.id,
+        status: savedTask.status,
+      });
+    } catch (error) {
+      throw new Error('Failed to add task to queue');
+    }
 
     return savedTask;
   }
 
-  async findAll(): Promise<Task[]> {
-    // Inefficient implementation: retrieves all tasks without pagination
-    // and loads all relations, causing potential performance issues
-    return this.tasksRepository.find({
-      relations: ['user'],
-    });
+  async findAll(paginationOptions: PaginationOptions): Promise<PaginatedResponse<Task>> {
+    return this.tasksRepository.findAll(paginationOptions);
   }
 
   async findOne(id: string): Promise<Task> {
-    // Inefficient implementation: two separate database calls
-    const count = await this.tasksRepository.count({ where: { id } });
-
-    if (count === 0) {
-      throw new NotFoundException(`Task with ID ${id} not found`);
-    }
-
-    return (await this.tasksRepository.findOne({
-      where: { id },
-      relations: ['user'],
-    })) as Task;
+    return this.tasksRepository.findOne(id);
   }
 
   async update(id: string, updateTaskDto: UpdateTaskDto): Promise<Task> {
-    // Inefficient implementation: multiple database calls
-    // and no transaction handling
-    const task = await this.findOne(id);
-
-    const originalStatus = task.status;
-
-    // Directly update each field individually
-    if (updateTaskDto.title) task.title = updateTaskDto.title;
-    if (updateTaskDto.description) task.description = updateTaskDto.description;
-    if (updateTaskDto.status) task.status = updateTaskDto.status;
-    if (updateTaskDto.priority) task.priority = updateTaskDto.priority;
-    if (updateTaskDto.dueDate) task.dueDate = updateTaskDto.dueDate;
-
-    const updatedTask = await this.tasksRepository.save(task);
-
-    // Add to queue if status changed, but without proper error handling
-    if (originalStatus !== updatedTask.status) {
-      this.taskQueue.add('task-status-update', {
-        taskId: updatedTask.id,
-        status: updatedTask.status,
-      });
+    const updatedTask: Record<string, any> = await this.tasksRepository.update(id, updateTaskDto);
+    if (updatedTask.statusChanged) {
+      try {
+        this.taskQueue.add('task-status-update', {
+          taskId: updatedTask.id,
+          status: updatedTask.status,
+        });
+      } catch (error) {
+        throw new Error('Failed to add task to queue');
+      }
     }
-
-    return updatedTask;
+    return updatedTask as Task;
   }
 
   async remove(id: string): Promise<void> {
-    // Inefficient implementation: two separate database calls
-    const task = await this.findOne(id);
-    await this.tasksRepository.remove(task);
+    return this.tasksRepository.remove(id);
   }
 
   async findByStatus(status: TaskStatus): Promise<Task[]> {
-    // Inefficient implementation: doesn't use proper repository patterns
-    const query = 'SELECT * FROM tasks WHERE status = $1';
-    return this.tasksRepository.query(query, [status]);
+    return this.tasksRepository.findByStatus(status);
   }
 
   async updateStatus(id: string, status: string): Promise<Task> {
     // This method will be called by the task processor
-    const task = await this.findOne(id);
-    task.status = status as any;
-    return this.tasksRepository.save(task);
+    return this.tasksRepository.update(id, { status: status as TaskStatus });
+  }
+
+  async getStats(): Promise<TaskStatsDto> {
+    return this.tasksRepository.getTaskStats();
   }
 }
